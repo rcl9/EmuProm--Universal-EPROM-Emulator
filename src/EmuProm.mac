@@ -1,0 +1,1410 @@
+.comment \
+**************************************************************
+*                                                            *
+*                   Eprom Emulator Driver	             *
+*                                                            *
+*                            By RCL9                              *
+*        (Rob's Retro Computing Archive)                             *
+*     RetroComputingArchive@gmail.com                            *
+*                          github.com/rcl9                            *
+*                                                            *
+*             December 1985	     *
+*                                                            *
+**************************************************************\
+
+cold:	jp	prompt
+
+; syslib.rel is required to assemble this program.
+
+; Assemble with M80 by:  M80 = emuprom
+;                        L80 emuprom,syslib/s,emuprom/n/e
+
+ext	fname		; declare syslib subroutines
+ext	fi0$open
+ext	fo0$open
+ext	fi0$close
+ext	fo0$close
+ext	f0$get
+ext	f0$put
+ext	capstr
+ext	caps
+
+; general equates
+
+wboot	equ	0000h		; CP/M warm boot
+bdos	equ	0005h		; CP/M bdos vector
+cr	equ	00dh
+lf	equ	00ah
+space	equ	020h
+esc	equ	01bh
+
+; --------------- Modified when adding new computer installation ------------
+
+; Computer 'type' flags used
+
+sorcerer	equ	1	; Adm 3A, 2mhz, S100 I/O 8255 interface
+piedpiper	equ	2	; Hazeltine, 4Mhz, Expansion board 8255
+colossus	equ	3	; 4 mhz, lcd screen (presently VT52 clear screen)
+cypher		equ	4	; 4 Mhz, VT52, Expansion Board 8255
+
+; this is port base+4 for the 8255 I/O chip. Ie, if it is addressed for
+; 252, then base will be 248.
+
+base:	defb	192		; Sorcerer
+	defb	248		; Pied Piper
+	defb	20h+4		; Colossus
+	defb	29		; Cypher (on odd bytes)
+
+; ---------------------------------------------------------------------------
+
+; general storage
+
+start:	defw	0000		; start of disk read/writes
+romend:	defw	0000		; end of disk read/writes
+length:	defw	0000		; current eprom length
+computer:defb	00		; type of computer in use.
+baseport:defb	00		; holds 8255 baseport address
+address:defw	0000		; current hardware counter address
+
+rw:	defw	00		; read/write flag
+x:	defb	00		; error location
+tn:	defb	00		; current eprom type
+inout:	defb	00		; programmer in/out data buss flag
+flags:	defb	00		; programmer current control word
+
+; place the number of eproms defined here:
+
+numprom:defb	5
+
+; the name of each defined eprom goes here. 
+
+names:	
+	defb	'2716            ',0
+	defb	'2732            ',0
+	defb	'2764            ',0
+	defb	'27128           ',0
+	defb	'27256           ',0
+
+; this defines the prom length in the module
+
+romdata:defw	800H		; 2716
+
+	defw	1000H		; 2732
+
+	defw	2000H		; 2764
+
+	defw	4000H		; 27128
+
+	defw	8000H		; 27256
+
+; ----------------------------------------------------------
+
+prompt:	call	ilprt
+	defb	cr,lf,lf
+	defb	'What computer is Eprom programmer attached to?',cr,lf,lf
+	defb	'1) Exidy Sorcerer (S100 parallel connector),',cr,lf
+	defb	'2) STM Pied Piper (Expansion board parallel port).',cr,lf
+	defb	'3) Colossus Control Computer.',cr,lf
+	defb	'4) Cypher Computer + VT52 Terminal.',cr,lf,lf,0
+pr1:	call	getchar
+	cp	'1'
+	jr	c,pr1
+	cp	'4'+1
+	jr	nc,pr1
+	sub	'0'		; make selection binary
+	ld	(computer),a
+	dec	a
+	ld	hl,base
+	ld	e,a
+	ld	d,0
+	add	hl,de
+	ld	a,(hl)		; get 8255 baseport address
+	ld	(baseport),a
+
+call	clrtty
+	call	ilprt
+	defb	'   (>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>)',cr,lf
+	defb	'   (                                                   )',cr,lf
+	defb	'   (    E M U P R O M   E P R O M   E M U L A T O R    )',cr,lf
+	defb	'   (                                                   )',cr,lf
+	defb	'   (              By RCL9 - github.com/rcl9 -  RetroComputingArchive@gmail.com,               )',cr,lf
+	defb	'   (                 December 20, 1985                 )',cr,lf
+	defb	'   (                   Version 1.0                     )',cr,lf
+	defb	'   (                                                   )',cr,lf
+	defb	'   <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<)',cr,lf,lf,0
+
+	ld	hl,l330		; change 0100h to warm start program
+	ld	(cold+1),hl
+
+	call	init		; init I/O ports
+	ld	a,020h
+	jp	l461		; go ask for eprom type
+
+l330:	call	clrtty	; clear the screen
+
+l340:	call	ilprt
+	defb	'No type selected.',cr,lf,0
+
+l350:	call	ilprt
+	defb	cr,lf,'Select option:',cr,lf ,lf
+	defb	'   1 - Set type.',cr,lf
+	defb	'   2 - Write 00 to all emulation memory.',cr,lf
+	defb	'   3 - Read disk file to emulation ram.',cr,lf
+	defb	'   4 - Write emulation ram to disk.',cr,lf
+	defb	'   5 - Mini-monitor.',cr,lf
+	defb	'   6 - Exit to CP/M.',cr,lf,lf
+	defb	'>',0
+	
+	call	rom$mode
+
+l440:	call	getchar
+	cp	'1'
+	jr	c,l440
+	cp	'6'+1
+	jr	nc,l440
+	sub	'1'		; make selection binary
+	sla	a
+	ld	d,0
+	ld	e,a
+	ld	hl,jmptbl
+	add	hl,de		; offset to routine address
+jmpsub:	ld	e,(hl)
+	inc	hl
+	ld	d,(hl)
+	ex	de,hl
+	jp	(hl)		; jump to routine
+
+jmptbl:	defw	l460		; set type
+	defw	clearbuf	; clear buffer to 00
+	defw	read$from$disk	; disk read
+	defw	write$to$disk	; disk write
+	defw	monitor		; mini-monitor
+	defw	l1110		; exit to cp/m
+
+; type selection
+
+l460:	call	clrtty
+l461:	ld	a,0		; ** program jumps here upon initialization **
+	ld	(tn),a		; zero eprom type
+	call	ilprt
+	defb	'Eprom emulation types available:',cr,lf,lf,0
+
+	ld	a,(numprom)	; get number of eproms defined
+	ld	c,1
+	ld	b,a		; set count
+	ld	hl,names	; point to eproms names
+	
+prtprom:ld	a,c
+	add	a,030h
+	call	type
+	call	ilprt
+	defb	' - ',0
+	push	hl
+	call	prtline		; print eprom name
+	pop	hl
+	call	crlf
+	ld	de,17
+	add	hl,de		; offset to next name
+	inc	c		; inc eprom number
+	djnz	prtprom
+
+l475:	call	ilprt
+	defb	cr,lf,'Enter type number? ',0
+	ld	a,(numprom)
+	ld	e,a		; save for later comparison
+	inc	e
+l480:	call	getchar
+	sub	30h
+	cp	1
+	jr	c,notav		; error if <1
+	cp	e
+	jr	nc,notav	; error if > last eprom number
+	ld	(tn),a		; save eprom type
+	jr	l500
+
+notav:	call	ilprt
+	defb	cr,lf,lf,'Type not available.',cr,lf,0
+	jr	l475
+
+l500:	ld	hl,romdata	
+	ld	a,(tn)
+	dec	a
+	sla	a		; make byte wide
+	ld	d,0
+	ld	e,a
+	add	hl,de		; offset to eprom data
+	
+	ld	e,(hl)		; get eprom length
+	inc	hl
+	ld	d,(hl)
+	inc	hl
+	ex	de,hl
+ 	ld	(length),hl
+
+l510:	call	clrtty
+	call	ilprt
+	defb	'Current emulation eprom type selected: ',0
+	call	prtrom
+	call	crlf
+	jp	l350		; go back to main menu
+
+; clear emulation ram routine
+
+clearbuf:call	clrtty
+	call	ilprt
+	defb	cr,lf,'Initialize Emulation Ram to 00 subroutine.',cr,lf,lf,0
+	call	l640
+	cp	'X'
+	jp	z,l510
+
+	call	ram$mode	; get control of the eprom socket
+	ld	hl,8000h	; clear 32k
+	ld	de,0
+clear$buf:
+	push	hl
+	ld	a,0
+	call	put$ram		; send byte to ram
+	inc	de
+	call	set$counter
+	pop	hl
+	dec	hl
+	ld	a,l
+	or	h
+	jr	nz,clear$buf
+	call	rom$mode	; give control back to eprom socket
+	call	crlf
+
+l620:	call	ilprt
+	defb	cr,lf,'Press any key to return to menu.',0
+	call	getchar
+	jp	l510		; jump to menu
+
+; wait for X or G
+
+l640:	call	ilprt
+	defb	cr,lf,'Press ''G'' to continue, ''X'' to abort.',0
+l650:	call	getchar
+	call	caps		; make uppercase
+	cð	'G'
+	jr	z,clrline
+	cp	'X'
+	jr	nz,l650
+	ret
+
+clrline:ld	a,13
+	call	type
+	call	ilprt
+	defb	'                                                   ',cr,0
+	ret
+
+; Print disk errors
+
+l840:	ld	a,(x)		; get verify error code
+
+dskerr:	sla	a
+	ld	e,a
+	ld	d,0
+	ld	hl,msgtbl
+	add	hl,de
+	ld	e,(hl)
+	inc	hl
+	ld	d,(hl)
+	ex	de,hl
+	call	crlf
+	call	crlf
+	call	prtline
+	call	crlf
+	jp	l620
+	
+
+msgtbl:	defw	msg0
+	defw	msg9
+	defw	msg10
+	defw	msg11
+	defw	msg12
+	defw	msg13
+	defw	msg14
+	defw	msg15
+	defw	msg16
+
+msg0:	defb	'Function complete.',0
+
+msg9:	defb	'Warning: Top of emulation ram reached, partial file load.',0
+msg10:	defb	'Disk I/O Error: Attempt to access unopened file.',0
+msg11:	defb	'Disk I/O Error: Disk full.',0
+msg12:	defb	'Disk I/O Error: Input file not found.',0
+msg13:	defb	'Disk I/O Error: Attempt to read past EOF.',0
+msg14:	defb	'Disk I/O Error: Directory full.',0
+msg15:	defb	'Disk I/O Error: Error in closing file.',0
+msg16:	defb	'Disk I/O Error: Attempt to open an already open file.',0
+
+; *** exit to CP/M ***
+
+l1110:	call	ilprt
+	defb	cr,lf,lf,'Exiting to CP/M.',cr,lf,0
+	call	rom$mode
+	jp	wboot
+
+; *** Mini-monitor ***
+
+monitor:call	clrtty
+	ld	a,(tn)
+	cp	0
+	jp	z,l330
+	call	ilprt
+	defb	cr,lf,lf,'Mini-Monitor Subroutine.',cr,lf,lf
+	defb	'This acts on the emulation ram ONLY, which runs from 0-7fffh.',cr,lf,lf
+	defb	'Command summary:',cr,lf,lf
+	defb	'M XXXX YYYY ZZZZ  --> Move memory range (XXXX-YYY) to ZZZZ.',cr,lf
+	defb	'M XXXX ZZZZ SAAAA --> Move XXXX to ZZZZ, block length = AAAA.',cr,lf
+	defb	'D XXXX YYYY       --> Dump memory from (XXXX-YYYY).',cr,lf
+	defb	'E XXXX            --> Enter data into memory at XXXX.',cr,lf
+	defb	'X                 --> Exit to main menu.',cr,lf,lf,0
+
+mini:	call	rom$mode	; gove control back to eprom socket
+	call	ilprt
+	defb	cr,lf,'>',0
+	call	linein
+	ld	a,(buffer+1)	; see if null line
+	cp	0
+	jr	z,mini
+	ld	hl,buffer+2
+	call	scan
+	inc	hl
+	jr	z,mini
+	call	ram$mode	; get control of eprom socket
+	cp	'M'
+	jr	nz,notm
+	call	move
+	jr	mini
+
+notm:	cp	'E'
+	jr	nz,note
+	call	enter
+	jr	mini
+
+note:	cp	'D'
+	jr	nz,notd
+	call	dump
+	jr	mini
+
+notd:	cp	'X'
+	jr	z,mon$exit
+	call	ilprt
+	defb	cr,lf,lf,'Commands are (M)ove, (E)nter, (D)ump, e(X)it.',cr,lf,0
+	jr	mini
+
+mon$exit:call	rom$mode	; give control back to eprom socket
+	jp	l510
+
+; *** disk read/write ***
+
+read$from$disk:
+	call	clrtty
+	ld	a,(tn)
+	cp	0
+	jp	z,l340
+	call	ilprt
+	defb	cr,lf,lf,'Read from disk file subroutine.',cr,lf,lf
+	defb	'Load ',0
+	ld	a,'R'
+	ld	(rw),a
+	jr	l486
+
+write$to$disk:
+	call	clrtty
+	ld	a,(tn)
+	cp	0
+	jp	z,l340
+	call	ilprt
+	defb	cr,lf,lf,'Write to disk file subroutine.',cr,lf,lf
+	defb	'Save ',0
+	ld	a,'W'
+	ld	(rw),a
+
+l486:	call	ilprt
+	defb	'start address (hex). <RETURN> for start of emulation ram (0000):',cr,lf
+	defb	'--> ',0
+	call	gethex
+	ld	a,b
+	cp	4
+	jr	nz,xlate
+	ld	hl,0000
+	jr	getend
+xlate:	ld	hl,buffer+2
+	call	conv
+	ex	de,hl
+
+getend: ld	(start),hl
+	call	crlf
+	call	crlf
+	ld	a,(rw)
+	cp	'R'
+	jp	z,LOAD
+
+	call	ilprt
+	defb	'Save end (hex) -- hit RETURN for Eprom length:',cr,lf
+	defb	'--> ',0
+	call	gethex
+	ld	a,b
+	cp	4
+	jr	nz,xlate2
+	ld	hl,(length)
+	dec	hl
+	jr	io
+
+xlate2:	ld	hl,buffer+2
+	call	conv
+	ex	de,hl
+
+io:	ld	(romend),hl
+	call	ram$mode	; switch control over to this computer
+	ld	de,(start)
+	call	set$counter	; set hardware counter to start save
+	call	crlf
+
+SAVE:	call	crlf
+	call	getfname
+	ld	de,fcb
+	call	fo0$open
+	jr	nz,saerr
+	ld	hl,(romend)
+	inc	hl
+	ex	de,hl
+	ld	hl,(start)
+save1:	call	get$ram		; get byte from ram
+	inc	hl
+	ex	de,hl
+	call	set$counter	; inc. to next ram location
+	ex	de,hl
+	push	hl
+	push	de
+	call	f0$put
+	pop	de
+	pop	hl
+	jr	nz,saerr
+	call	comp
+	jr	nz,save1
+	call	fo0$close
+	jr	nz,saerr
+	call	rom$mode
+	xor	a
+	ld	(x),a
+	jp	l840
+
+saerr:	push	af
+	call	fo0$close
+	call	rom$mode	; give control back
+	pop	af
+	add	a,9
+	jp	dskerr		; go print disk error message
+
+
+LOAD:	call	ram$mode	; give control to this computer
+	ld	de,(start)	; set address
+	call	set$counter
+	call	getfname
+	ld	de,fcb
+	call	fi0$open
+	jp	nz,lderr
+	ld	hl,32768	; top of emulation ram
+	ex	de,hl		; DE = end of memory
+	ld	hl,(start)
+load1:	push	hl
+	push	de
+	call	f0$get
+	pop	de
+	pop	hl
+	jr	z,load2
+	cp	4		; read past end of file?
+	jr	nz,lderr
+	jr	load3
+load2:	call	put$ram
+	inc	hl
+	ex	de,hl
+	call	set$counter	; inc. to next ram location
+	ex	de,hl
+	call	comp
+	jr	nz,load1
+	ld	a,0
+	jr	lderr		; say top of memory reached
+load3:	call	rom$mode	; give control back
+	call	fi0$close
+	jr	nz,lderr
+	xor	a
+	ld	(x),a
+	jp	l840	
+
+lderr:	push	af
+	call	rom$mode
+	call	fi0$close
+	pop	af
+	add	a,1
+	jp	dskerr		; go print disk error message
+
+; compare HL and DE, Z = same, NZ = not same
+
+comp:	ld	a,h
+	sub	d
+	ret	nz
+	ld	a,l
+	sub	e
+	ret
+
+getfname:
+	call	ilprt
+	defb	'Please input filename, of form ''du:filename.typ'':',cr,lf,0
+	ld	a,'>'
+name2:	call	type
+	call	linein
+	ld	a,(buffer+1)
+	cp	0
+	jr	nz,name1
+	pop	ix
+	jp	l510
+
+name1:	ld	hl,buffer+2
+	ld	de,fcb
+	call	fname		; init fcb
+	ret	nz
+	call	ilprt
+	defb	cr,lf,'ERROR, invalid drive or user number - please try again:',cr,lf,0
+	jr	name2
+
+; input a 4 character hex address
+
+gethex:	ld	b,4		; set length (4 bytes max)
+	ld	hl,buffer+2	; somewhere to put it
+
+geth:	call	getchar
+	cp	'X'
+	jr	nz,geth1
+	pop	ix	
+	pop	ix
+	jp	l510
+geth1:	cp	8
+	jr	z,bs
+	cp	07fh		; rubout?
+	jr	z,bs
+	ld	(hl),a
+	inc	hl
+	ld	(hl),0		; put in delimeter for conv.
+	dec	hl
+	cp	cr
+	ret	z
+	inc	b
+	dec	b
+	jr	z,geth
+	cp	'0'
+	jr	c,geth
+	cp	'F'+1
+	jp	nc,geth
+	cp	'9'+1
+	jr	c,ok
+	cp	'A'
+	jp	c,geth
+ok:	call	type
+	inc	hl
+	dec	b
+	jr	geth
+
+bs:	ld	a,b
+	cp	4
+	jr	z,geth
+	inc	b
+	ld	a,8
+	call	type
+	ld	a,32
+	call	type
+	ld	a,8
+	call	type
+	ld	(hl),0
+	dec	hl
+	jr	geth
+
+; print name of current eprom, stops printing on second space
+; or zero terminator
+
+prtrom:	push	hl
+	push	de
+	push	bc
+	push	af
+	ld	hl,names
+	ld	a,(tn)
+	dec	a
+	jr	z,prt15
+	ld	b,a
+	ld	e,17
+	ld	d,0
+addmore:add	hl,de
+	djnz	addmore
+prt15:	ld	b,0
+prt:	ld	a,(hl)
+	inc	hl
+	cp	0
+	jr	z,prt1		; all done if 0
+	cp	020h
+	jr	nz,gotype
+	ld	a,b
+	cp	020h
+	jr	z,prt1		; if two spaces, quit
+	ld	a,020h
+gotype:	call	type
+	ld	b,a
+	jr	prt
+
+prt1:	pop	af
+	pop	bc
+	pop	de
+	pop	hl
+	ret
+
+;hex output routines - address in 'de', byte in 'a'
+
+addout:	ld	a,d
+	call	hchout
+	ld	a,e
+hchout:	push	af		; enter here for byte output
+	and	0f0h
+	rrca
+	rrca
+	rrca
+	rrca
+	call	hchot2
+	pop	af
+	and	0fh
+hchot2:	cp	0ah
+	jr	c,hchot3
+	add	a,'A'-3ah
+hchot3:	add	a,30h
+hchot4:	jp	type
+
+
+;print hex.address and colon
+
+addcol:	call	addout
+	ld	a,':'
+	call	type
+dspspc: ld	a,space
+	jp	type
+
+;print space and hex byte
+
+hexspc:	push	af
+	ld	a,space
+	call	type
+	pop	af
+	jr	hchout
+
+
+;conversion routine for converting 1 or 2 bytes to hex
+;if one byte returns in 'E' two in 'DE'
+
+conv:	ld	de,0
+conv1:	ld	a,(hl)
+	cp	'0'
+	ret	c
+	inc	hl
+	cp	'F'+1
+	jp	nc,errpar
+	cp	'9'+1
+	jr	c,number
+	cp	'A'
+	jp	c,errpar
+	add	a,9Šnumber:	rlca
+	rlca
+	rlca
+	rlca
+	ld	b,4
+conv2:	rlca
+	rl	e
+	rl	d
+	djnz	conv2
+	jr	conv1
+
+;message table
+
+dhead:	db	cr,lf,'Addr   0  1  2  3   4  5  6  7'
+	db	'   8  9  A  B   C  D  E  F',cr,lf,lf,0
+
+;dump memory routine
+
+dump:	call	bghnt1	; get start into DE
+	call	scan
+	jr	z,sdump
+	ld	a,e
+	and	0f0h		; start on 16 byte boundary
+	ld	e,a
+	push	de
+	call	set$counter	; set starting address
+	call	conv		; get end address
+	inc	de
+	push	de
+dump1:	ld	hl,dhead
+	call	msgout
+	ld	b,16
+	pop	hl
+	pop	de
+dump2:	call	quik
+	cp	'S'-40h		; pause output with ^S or Spacebar
+	jr	z,dump3a
+	cp	020h
+	jr	z,dump3a
+	or	a
+	ret	nz		; return if user presses any key
+	jr	dump4
+
+dump3a:	call	quik
+	cp	'S'-40h		; pause output with ^S or Spacebar
+	jr	z,dump3a
+	cp	020h
+	jr	z,dump3a
+	or	a
+	ret	nz		; return if user presses any key
+dump4:	call	addcol
+dump3:	call	get$ram
+	call	hexspc
+	inc	de
+	call	set$counter	; inc hardware counter
+	push	hl
+	or	a
+	sbc	hl,de
+	pop	hl
+	jp	z,crlf
+	ld	a,e
+	and	0fh
+	jr	z,nxtlin
+	and	003h		;logic can be applied efficiently
+	call	z,dspspc
+	jr	dump3
+
+nxtlin: call	crlf
+	djnz	dump2
+	push 	de
+	push	hl
+	jr	dump1
+
+sdump:	call	addcol
+	call	set$counter
+	call	get$ram
+	call	hexspc
+	jp	crlf
+
+
+;enter hex.byte routine
+
+enter:	call	bghnt1		; get entry address into DE
+enter1:	call	set$counter	; set up hardware counter
+	push	de
+	call	crlf
+	call	addcol		; print out address
+	call	linein
+	ld	a,(buffer+1)
+	cp	0
+	jr	z,enter1
+	call	crlf
+	pop	de
+	ld	hl,buffer+2
+enter2:	call	scan
+	jr	z,enter1
+	cp	'/'
+	ret	z
+	push	de
+	call	conv
+	ld	a,e
+	pop	de
+	call	put$ram		; store away byte
+	inc	de
+	call	set$counter
+	jr	enter2
+
+;move block routine
+
+move:	call	beghnt		; put from in IX, TO into DE
+	push	ix		; save FROM
+	push	de		; save TO
+	call	scanŠ	jp	z,error2
+	cp	'S'		
+	jr	z,move2
+	call	conv
+	or	a
+	scf
+	ccf
+	pop	hl
+	pop	bc
+	push	bc
+	sbc	hl,bc
+	jp	c,errpar
+	push	hl
+	pop	bc
+move1:	pop	hl
+	inc	bc
+
+move1b:	push	de		; save emulation ram destination
+	ex	de,hl		; de = source
+	ld	hl,start$of$mem	; move to real memory
+	push	bc
+
+move1c:	call	set$counter	; set counter to source
+	call	get$ram
+	ld	(hl),a
+	inc	hl
+	inc	de
+	dec	bc
+	ld	a,b
+	or	c
+	jr	nz,move1c
+
+	pop	bc
+	pop	de
+	ld	hl,start$of$mem
+move1d:	call	set$counter	; set counter to source
+	ld	a,(hl)
+	call	put$ram
+	inc	hl
+	inc	de
+	dec	bc
+	ld	a,b
+	or	c
+	jr	nz,move1d
+	ret
+	
+move2:	inc	hl
+	call	scan
+	jp	z,error2
+	call	conv
+	push	de
+	pop	bc
+	pop	de
+	jr	move1
+
+errpar:	call	ilprt
+	defb	'Parameter error.',cr,lf,0
+	pop	ix
+	jp	mini		; could have stack problems here
+
+
+;converts FROM in IX & TO in DE to binary
+
+beghnt:	call	bghnt4
+	push	de		;save from...
+	pop	ix		;...here
+bghnt3:	call	scan		;get TO address
+	jr	z,error1
+	call	conv
+	ret
+
+error2:	pop	ix	; pop return to beghnt from bghnt3
+error1:	call	ilprt
+	defb	'ERROR: Address field missing.',cr,lf,0
+	pop	ix	; remove return to MOVE routine
+	ret		; return to main subroutine
+
+
+bghnt1:	call	crlf
+bghnt2:	call	scanhl
+	jr	z,error1
+	call	conv
+	ret
+
+bghnt4:	call	crlf
+bghnt5:	call	scanhl
+	jr	z,error2
+	call	conv
+	ret
+
+
+;scan command buffer routine
+
+scan:	ld	a,(hl)
+patch:	cp	cr
+	ret	z
+
+	cp	'.'
+	ret	z
+	ret	nc
+	inc	hl
+	jr	scan
+
+; enter here with buffer address in HL
+
+scanhl:	
+scanlt:	ld	a,(hl)
+	cp	cr
+	ret	z
+	cp	'0'
+	jr	c,scan
+	inc	hl
+	jr	scanlt
+
+; input a line to buffer from the console
+
+linein:	push	af
+	push	bc
+	push	de
+	push	hl
+	ld	de,buffer
+	ld	c,10
+	call	bdos		; go input a string
+
+	ld	hl,buffer+2
+	ld	a,(buffer+1)
+	ld	e,a
+	ld	d,0
+	add	hl,de
+	ld	(hl),13		; put in delimiter
+	inc	hl
+	ld	(hl),0		; put in delimiter for syslib
+	ld	hl,buffer+2
+	call	capstr		; make all uppercase
+	pop	hl
+	pop	de
+	pop	bc
+	pop	af
+	ret
+
+
+ilprt:	exx			; save them all
+	pop	hl		; get address of the string after the CALL
+
+ilprt1:	ld	a,(hl)		; print out string byte by byte
+	ld	c,a		; transfer for CP/M call
+	inc	hl
+	cp	0		; terminator byte?
+	jr	z,ilprt2	; yes, finish up routine
+	push	hl	
+	call	type  
+	pop	hl
+	jr	ilprt1		; continue printing
+
+ilprt2:	push	hl		; push return back on stack
+	exx			; get back registers
+	ret
+
+
+type:	push	hl
+	push	de
+	push	bc
+	push	af
+	ld	c,2
+	ld	e,a
+	call	bdos		; send character to console
+	pop	af
+	pop	bc
+	pop	de
+	pop	hl
+	ret
+
+
+;carriage/linefeed routine
+
+crlf:	push	af
+	ld	a,cr
+	call	typeŠ	ld	a,lf
+	call	type
+	pop	af
+	ret
+
+
+;message output routines
+Šprtline:
+msgout:	ld	a,(hl)
+	or	a
+	ret	z
+	inc	hl
+	call	type
+	jr	msgout
+
+
+quik:	push	hl
+	push	de
+	push	bc
+	ld	c,06h		; direct console input
+	ld	e,0ffh
+	call	bdos
+	or	a
+	pop	bc
+	pop	de
+	pop	hl
+	ret
+
+; wait for character from console, do not echo, make uppercase
+
+getchar:push	hl
+	push	de
+	push	bc
+nochar:	ld	c,06h		; direct console input
+	ld	e,0ffh
+	call	bdos
+	or	a
+	jr	z,nochar
+	cp	'a'
+	jr	c,notlow
+	cp	'z'+1
+	jr	nc,notlow
+	sub	20h		; make uppercase 
+notlow:	pop	bc
+	pop	de
+	pop	hl
+	ret
+
+; ------------- System dependent subroutines -----------------
+
+; initialize I/O hardware , make 8255 Port A output, C input
+; then set direction of bidirectiional port on eprom
+; emulator to input.
+
+init:	ld	a,1		; set in/out flag to input
+	ld	(inout),a
+	ld	a,137
+	call	putout		; make 8255 port A out & C in
+	defb	7
+	call	input
+	ld	a,2
+	ld	(flags),a	; put into ram mode
+	call	reset		; reset the counter & address bits
+	ld	a,2		; set buss to into computer
+	ld	(flags),a
+	call	putout		; output to Port A
+	defb	4
+	ret
+
+; reset the address counter and upper address bit flags
+
+reset:	push	af
+	ld	a,(flags)
+	and	6
+	or	1
+	call	putout		; reset the counter
+	defb	4
+	and	0eh		; kill upper address bits and reset
+	ld	(flags),a
+	call	putout
+	defb	4
+	ld	a,0
+	ld	(address),a	; kill counter memory image
+	ld	(address+1),a
+	pop	af
+	ret
+
+; make Port C of 8255 output and programmer buss to output
+
+output:	push	af
+	ld	a,0		; signify output mode
+	ld	(inout),a
+	ld	a,(flags)	; get current control word
+	and	0fdh		; make ram buss input to board
+	ld	(flags),a
+	call	putout		; output to Port A
+	defb	4
+	ld	a,128
+	call	putout		; set 8255 Port A & C to output
+	defb	7
+	ld	a,(flags)
+	call	putout
+	defb	4
+	pop	af
+	ret
+
+; make Port C of 8255 input and programmer buss to input
+
+input:	push	af
+	ld	a,1		; signify input mode
+	ld	(inout),a
+	ld	a,137
+	call	putout		; set 8255 Port A to output, C to input
+	defb	7		; enable programmer buss to input
+	ld	a,(flags)	; get current control word
+	or	20h		; make buss input
+	ld	(flags),a
+	call	putout
+	defb	4
+	pop	af
+	ret
+
+; set hardware counter (11 bits) and 3 software bits to DE
+
+set$counter:
+	push	af
+	push	hl
+	push	de
+
+	push	de
+	ld	hl,(address)	; get present counter address
+	ld	a,h
+	and	7
+	ld	h,a
+	ld	a,d
+	and	7
+	ld	d,a
+	scf
+	ccf
+	sbc	hl,de
+	pop	de
+	jr	nc,from$start
+
+; first redo the address bits in the flag byte
+
+	ld	a,d
+	sla	a	
+	and	0f0h		; keep bits a11-a14
+	ld	l,a
+	ld	a,(flags)
+	and	0fh		; kill address bits
+	or	l
+	ld	(flags),a
+	call	putout
+	defb	4		; send new address bits
+
+; we can just inc. the counter to new address from old address
+
+	ex	de,hl		; hl = new address
+	ld	de,(address)	; get the old address
+	ld	(address),hl	; update new counter address
+	ld	a,h
+	and	7
+	ld	h,a
+	ld	a,d
+	and	7
+	ld	d,a
+	scf
+	ccf
+	sbc	hl,de		; get # of bytes to inc.
+	ld	a,l
+	or	h
+	jr	z,no$change	; address same, no change
+	ex	de,hl
+	call	inc$counter	; de = # of bytes to increment
+	jr	no$change	; all done
+
+; reset counter and move counter up to correct location
+
+from$start:
+	call	reset		; reset the counter
+	ld	(address),de	; update new address
+
+	ld	a,d
+	sla	a	
+	and	0f0h		; keep bits a11-a14
+	ld	l,a
+	ld	a,(flags)
+	and	0fh		; kill address bits
+	or	l
+	ld	(flags),a
+	call	putout
+	defb	4		; send new address bits
+
+	ld	a,d
+ 	and	07		; kill A11-A15
+	ld	d,a
+	or	e
+	jr	z,no$change	; address ok, no change needed
+	call	inc$counter	; inc to correct address
+
+no$change:
+	pop	de
+	pop	hl
+	pop	af
+	ret
+
+; increment hardware counter by DE bytes (>0 bytes!)
+
+inc$counter:
+	ld	a,(flags)
+	and	0feh		; kill reset bit
+	ld	(flags),a
+	or	08h		; set clock high
+	push	af
+clear:	pop	af
+	push	af
+	call	putout		; set clock high
+	defb	4		; output to control port
+	and	0f7h
+	call	putout		; set clock low (inc. counter)
+	defb	4
+	dec	de
+	ld	a,d
+	or	e
+	jr	nz,clear
+
+done:	pop	af
+	ret
+
+get$ram:ld	a,(flags)
+	or	02		; set board buss to output
+	ld	(flags),a
+	call	putout
+	defb	4
+	call	get		; get byte from port C
+	ret
+
+put$ram:push	af
+	ld	a,(flags)
+	and	0fdh		; set borad buss to input
+	ld	(flags),a	; and update flags
+	call	putout
+	defb	4
+	pop	af
+	call	put		; send byte to memories
+
+; now toggle the WE line to write to the memories
+
+	ld	a,(flags)
+	push	af
+	or	4
+	call	putout		; toggle WE high
+	defb	4
+	pop	af
+	call	putout		; toggle WE low
+	defb	4
+	ret
+
+; toggle board control to this computer and reset system to
+; initialization setup
+
+ram$mode:
+	push	af
+	call	init
+	pop	af
+	ret
+
+; toggle board control to the eprom socket computer
+
+rom$mode:
+	push	af
+	ld	a,(flags)
+	or	8		; turn control over the eprom socket
+	or	2		; tell rams to output
+	ld	(flags),a
+	call	putout
+	defb	4
+	pop	af
+	ret
+
+; input byte to A from Port C (from programmer data buss)
+
+get:	ld	a,(inout)	; is programmer data buss
+	cp	1		; in input mode now?
+	jr	z,get1		; yes, dont change
+	call	input		; switch data buss to input
+get1:	call	getinp		; input from port C
+	defb	6
+	ret
+
+; output A to Port C (goes to programmer data buss)
+
+
+put:	push	af
+	ld	a,(inout)	; is programmer data buss
+	cp	0		; in input mode now?
+	jr	z,put1		; yes, dont change
+	call	output		; switch data buss to output
+put1:	pop	af
+	call	putout		; output to port C
+	defb	6
+	ret
+
+; input byte from port specified by offset
+;
+;   getinp
+;   defb 	'4'		- port offset
+
+getinp:	ex	(sp),hl
+	ld	a,(hl)
+	inc	hl
+	ex	(sp),hl
+	push	bc
+	ld	c,a
+	ld	a,(baseport)
+	ld	b,a
+	ld	a,(computer)
+	cp	cypher
+	ld	a,b
+	jr	nz,notcyp
+
+	ld	a,c		; translate for cypher odd byte
+	sub	4		; addressing
+	sla	a
+	add	a,b
+	add	a,4
+	jr	cont7
+
+notcyp:	add	a,c
+cont7:	ld	c,a
+	in	a,(c)
+	pop	bc
+	ret
+
+; output byte from port specified by offset
+;
+;   putout
+;   defb 	'4'		- port offset
+
+putout:	ex	af,af'		; save char to send
+	ex	(sp),hl		; get address of port
+	ld	a,(hl)		; get relative port
+	inc	hl		; inc. program counter
+	ex	(sp),hl		; save PC
+	push	bc
+	ld	c,a		
+	ld	a,(baseport)	; get absolute port address
+	ld	b,a
+	ld	a,(computer)
+	cp	cypher
+	ld	a,b
+	jr	nz,notcy2
+
+	ld	a,c		; translate for cypher odd byte
+	sub	4		; addressing
+	sla	a
+	add	a,b
+	add	a,4
+	jr	cont8
+
+notcy2:	add	a,c
+cont8:	ld	c,a
+	ex	af,af'
+	out	(c),a
+	pop	bc
+	ret
+
+; >>> clear screen <<<
+
+clrtty:	push	af			; Sorcerer clear screen
+	ld	a,(computer)
+	cp	sorcerer
+	jr	nz,clrtt2
+	ld	a,0ch			
+	call	type
+	pop	af
+	ret
+
+clrtt2:	cp	colossus
+	jr	z,col
+	cp	cypher			; Cypher clear screen
+	jr	nz,ppcls
+col:	ld	a,esc
+	call	type
+	ld	a,'E'			; VT52 clear screen
+	call	type
+	pop	af
+	ret
+	
+ppcls:	ld	a,07eh			; Pied Piper Clear Screen
+	call	type
+	ld	a,01ch
+	call	type
+	pop	af
+	ret
+
+; ----------------------------------------------------------
+
+buffer:	defb	80		; max number of chars to input
+	defb	00		; number of chars input from bdos
+	defs	82
+
+fcb:	defs	36
+
+start$of$mem	equ	$
+
+	end	

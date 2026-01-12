@@ -1,0 +1,7 @@
+; This file compiles the EmuProm program using the Z80 Super Assembler & Linker (by SLR Systems)
+;
+z80asm emprom
+;
+; Note: SLRNK does not like 'aseg, org 0100h' in the .mac file?!?
+;
+slrnk /p:100,emprom,a:syslib/s,emprom/n/e
